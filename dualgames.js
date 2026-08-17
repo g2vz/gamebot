@@ -1,128 +1,49 @@
 const {
+    EmbedBuilder,
     ActionRowBuilder,
     ButtonBuilder,
-    ButtonStyle,
-    EmbedBuilder
+    ButtonStyle
 } = require("discord.js");
 
-// ============================================================
-// DUAL GAMES
-// ============================================================
-//
-// Current Dual game:
-// /rps opponent:@player
-//
-// Rock Paper Scissors
-// ============================================================
+const activeDuels = new Map();
 
-const games = new Map();
+const OWNER_ID = "1193602200644091957";
+const WIN_POINTS = 15;
 
-const CHALLENGE_TIME = 30 * 1000;
-const ROUND_TIME = 45 * 1000;
-const POINTS_WIN = 15;
+const CHALLENGE_TIMEOUT = 30_000;
+const ROUND_TIMEOUT = 45_000;
 
 // ============================================================
 // HELPERS
 // ============================================================
 
-function gameKey(guildId, channelId) {
+function getGameKey(guildId, channelId) {
     return `${guildId}:${channelId}`;
 }
 
-function getPoints(client, userId) {
-    if (typeof client.getPoints === "function") {
-        return client.getPoints(userId);
-    }
-
-    return 0;
-}
-
-function addPoints(client, userId, amount) {
-    if (typeof client.addPoints === "function") {
-        return client.addPoints(userId, amount);
-    }
-
-    return 0;
-}
-
-function isOwner(client, userId) {
-    if (typeof client.isOwner === "function") {
-        return client.isOwner(userId);
-    }
-
-    return false;
-}
-
-function balanceText(client, userId) {
-    if (isOwner(client, userId)) {
-        return "∞";
-    }
-
-    return getPoints(client, userId).toLocaleString();
-}
-
-function cleanupGame(key) {
-    const game = games.get(key);
-
-    if (!game) {
-        return;
-    }
-
-    if (game.challengeTimeout) {
-        clearTimeout(game.challengeTimeout);
-    }
-
-    if (game.roundTimeout) {
-        clearTimeout(game.roundTimeout);
-    }
-
-    if (game.collector) {
-        try {
-            game.collector.stop("game_finished");
-        } catch {}
-    }
-
-    games.delete(key);
+function isOwner(userId) {
+    return userId === OWNER_ID;
 }
 
 function getChoiceName(choice) {
-    if (choice === "rock") {
-        return "🪨 Rock";
-    }
+    const choices = {
+        rock: "🪨 Rock",
+        paper: "📄 Paper",
+        scissors: "✂️ Scissors"
+    };
 
-    if (choice === "paper") {
-        return "📄 Paper";
-    }
-
-    if (choice === "scissors") {
-        return "✂️ Scissors";
-    }
-
-    return "Unknown";
+    return choices[choice] || choice;
 }
 
-function determineWinner(player1Choice, player2Choice) {
-    if (player1Choice === player2Choice) {
+function getWinner(choice1, choice2) {
+    if (choice1 === choice2) {
         return "tie";
     }
 
     if (
-        player1Choice === "rock" &&
-        player2Choice === "scissors"
-    ) {
-        return "player1";
-    }
-
-    if (
-        player1Choice === "paper" &&
-        player2Choice === "rock"
-    ) {
-        return "player1";
-    }
-
-    if (
-        player1Choice === "scissors" &&
-        player2Choice === "paper"
+        (choice1 === "rock" && choice2 === "scissors") ||
+        (choice1 === "paper" && choice2 === "rock") ||
+        (choice1 === "scissors" && choice2 === "paper")
     ) {
         return "player1";
     }
@@ -130,52 +51,92 @@ function determineWinner(player1Choice, player2Choice) {
     return "player2";
 }
 
-// ============================================================
-// CREATE RPS BUTTONS
-// ============================================================
+function addPoints(client, userId, amount) {
+    // Owner has unlimited money/points.
+    if (isOwner(userId)) {
+        return;
+    }
 
-function createRPSButtons(gameId) {
-    return new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId(`rps_${gameId}_rock`)
-                .setLabel("Rock")
-                .setEmoji("🪨")
-                .setStyle(ButtonStyle.Primary),
+    // Supports the points system from gamebot.js if available.
+    if (typeof client.addPoints === "function") {
+        client.addPoints(userId, amount);
+    }
+}
 
-            new ButtonBuilder()
-                .setCustomId(`rps_${gameId}_paper`)
-                .setLabel("Paper")
-                .setEmoji("📄")
-                .setStyle(ButtonStyle.Primary),
+function getBalance(client, userId) {
+    if (isOwner(userId)) {
+        return "∞";
+    }
 
-            new ButtonBuilder()
-                .setCustomId(`rps_${gameId}_scissors`)
-                .setLabel("Scissors")
-                .setEmoji("✂️")
-                .setStyle(ButtonStyle.Primary)
-        );
+    if (typeof client.getPoints === "function") {
+        return client.getPoints(userId).toLocaleString();
+    }
+
+    return "0";
+}
+
+function clearGame(gameKey) {
+    const game = activeDuels.get(gameKey);
+
+    if (!game) {
+        return;
+    }
+
+    if (game.challengeTimer) {
+        clearTimeout(game.challengeTimer);
+    }
+
+    if (game.roundTimer) {
+        clearTimeout(game.roundTimer);
+    }
+
+    activeDuels.delete(gameKey);
 }
 
 // ============================================================
-// CREATE CHALLENGE BUTTONS
+// CHALLENGE BUTTONS
 // ============================================================
 
-function createChallengeButtons(gameId) {
-    return new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId(`rps_accept_${gameId}`)
-                .setLabel("Accept")
-                .setEmoji("✅")
-                .setStyle(ButtonStyle.Success),
+function challengeButtons(gameId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`rpsaccept:${gameId}`)
+            .setLabel("Accept")
+            .setEmoji("✅")
+            .setStyle(ButtonStyle.Success),
 
-            new ButtonBuilder()
-                .setCustomId(`rps_decline_${gameId}`)
-                .setLabel("Decline")
-                .setEmoji("❌")
-                .setStyle(ButtonStyle.Danger)
-        );
+        new ButtonBuilder()
+            .setCustomId(`rpsdecline:${gameId}`)
+            .setLabel("Decline")
+            .setEmoji("❌")
+            .setStyle(ButtonStyle.Danger)
+    );
+}
+
+// ============================================================
+// RPS BUTTONS
+// ============================================================
+
+function rpsButtons(gameId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`rpschoice:${gameId}:rock`)
+            .setLabel("Rock")
+            .setEmoji("🪨")
+            .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+            .setCustomId(`rpschoice:${gameId}:paper`)
+            .setLabel("Paper")
+            .setEmoji("📄")
+            .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+            .setCustomId(`rpschoice:${gameId}:scissors`)
+            .setLabel("Scissors")
+            .setEmoji("✂️")
+            .setStyle(ButtonStyle.Primary)
+    );
 }
 
 // ============================================================
@@ -190,8 +151,7 @@ async function startRPS(interaction, client) {
         });
     }
 
-    const opponent =
-        interaction.options.getUser("opponent");
+    const opponent = interaction.options.getUser("opponent");
 
     if (!opponent) {
         return interaction.reply({
@@ -214,27 +174,26 @@ async function startRPS(interaction, client) {
         });
     }
 
-    const key = gameKey(
+    const key = getGameKey(
         interaction.guildId,
         interaction.channelId
     );
 
-    if (games.has(key)) {
+    if (activeDuels.has(key)) {
         return interaction.reply({
             content:
-                "❌ There is already a Duel game running in this channel.",
+                "❌ There is already a Duel running in this channel.",
             ephemeral: true
         });
     }
 
+    // Unique ID with NO underscores.
     const gameId =
-        `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        `${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
 
     const game = {
         id: gameId,
         key,
-
-        type: "rps",
 
         player1: interaction.user.id,
         player2: opponent.id,
@@ -246,19 +205,19 @@ async function startRPS(interaction, client) {
 
         message: null,
 
-        challengeTimeout: null,
-        roundTimeout: null,
-        collector: null
+        challengeTimer: null,
+        roundTimer: null
     };
 
-    games.set(key, game);
+    activeDuels.set(key, game);
 
     const embed = new EmbedBuilder()
         .setTitle("⚔️ ROCK PAPER SCISSORS")
         .setDescription(
-            `**${interaction.user}** has challenged **${opponent}**!\n\n` +
-            `The challenge expires in **30 seconds**.\n\n` +
-            `Only **${opponent}** can accept or decline.`
+            `**${interaction.user}** challenged **${opponent}**!\n\n` +
+            `🎮 **${interaction.user.username}** vs **${opponent.username}**\n\n` +
+            `Only ${opponent} can accept this challenge.\n\n` +
+            `⏱️ Challenge expires in **30 seconds**.`
         )
         .setFooter({
             text: "1v1 Duel"
@@ -267,7 +226,7 @@ async function startRPS(interaction, client) {
     const message = await interaction.reply({
         embeds: [embed],
         components: [
-            createChallengeButtons(gameId)
+            challengeButtons(gameId)
         ],
         fetchReply: true
     });
@@ -278,90 +237,119 @@ async function startRPS(interaction, client) {
     // Challenge timeout
     // --------------------------------------------------------
 
-    game.challengeTimeout = setTimeout(async () => {
-        if (!games.has(key)) {
+    game.challengeTimer = setTimeout(async () => {
+        if (!activeDuels.has(key)) {
             return;
         }
 
-        cleanupGame(key);
+        clearGame(key);
+
+        const expiredEmbed = new EmbedBuilder()
+            .setTitle("⚔️ ROCK PAPER SCISSORS")
+            .setDescription(
+                `⌛ The challenge from **${interaction.user.username}** expired.\n\n` +
+                `${opponent} did not accept in time.`
+            );
 
         await message.edit({
-            embeds: [
-                new EmbedBuilder()
-                    .setTitle("⚔️ ROCK PAPER SCISSORS")
-                    .setDescription(
-                        "⌛ **Challenge expired.**\n\n" +
-                        `${opponent} did not accept the challenge in time.`
-                    )
-            ],
+            embeds: [expiredEmbed],
             components: []
         }).catch(() => {});
-    }, CHALLENGE_TIME);
+    }, CHALLENGE_TIMEOUT);
 }
 
 // ============================================================
-// START ROUND
+// ACCEPT RPS
 // ============================================================
 
-async function startRPSRound(game, interaction) {
-    const key = game.key;
+async function acceptRPS(interaction, game) {
+    if (interaction.user.id !== game.player2) {
+        return interaction.reply({
+            content:
+                "❌ Only the challenged player can accept this game.",
+            ephemeral: true
+        });
+    }
 
-    if (!games.has(key)) {
-        return;
+    if (game.challengeTimer) {
+        clearTimeout(game.challengeTimer);
+        game.challengeTimer = null;
     }
 
     game.accepted = true;
-
-    if (game.challengeTimeout) {
-        clearTimeout(game.challengeTimeout);
-        game.challengeTimeout = null;
-    }
 
     const embed = new EmbedBuilder()
         .setTitle("⚔️ ROCK PAPER SCISSORS")
         .setDescription(
             `**<@${game.player1}>** vs **<@${game.player2}>**\n\n` +
             `Choose your move below.\n\n` +
-            `🔒 Your choice is hidden from your opponent.\n\n` +
-            `You have **45 seconds**.`
+            `🔒 Your choice will remain hidden from your opponent.\n\n` +
+            `⏱️ You have **45 seconds**.`
         )
         .setFooter({
-            text: "Choose Rock, Paper, or Scissors."
+            text: "Choose your weapon."
         });
 
     await interaction.update({
         embeds: [embed],
         components: [
-            createRPSButtons(game.id)
+            rpsButtons(game.id)
         ]
     });
 
-    game.roundTimeout = setTimeout(async () => {
-        if (!games.has(key)) {
+    game.roundTimer = setTimeout(async () => {
+        if (!activeDuels.has(game.key)) {
             return;
         }
 
-        cleanupGame(key);
+        clearGame(game.key);
+
+        const timeoutEmbed = new EmbedBuilder()
+            .setTitle("⚔️ ROCK PAPER SCISSORS")
+            .setDescription(
+                "⌛ **Round expired.**\n\n" +
+                "One or both players did not choose in time."
+            );
 
         await game.message.edit({
-            embeds: [
-                new EmbedBuilder()
-                    .setTitle("⚔️ ROCK PAPER SCISSORS")
-                    .setDescription(
-                        "⌛ **The round timed out.**\n\n" +
-                        "Both players needed to choose within 45 seconds."
-                    )
-            ],
+            embeds: [timeoutEmbed],
             components: []
         }).catch(() => {});
-    }, ROUND_TIME);
+    }, ROUND_TIMEOUT);
 }
 
 // ============================================================
-// HANDLE RPS CHOICE
+// DECLINE RPS
 // ============================================================
 
-async function handleRPSChoice(
+async function declineRPS(interaction, game) {
+    if (interaction.user.id !== game.player2) {
+        return interaction.reply({
+            content:
+                "❌ Only the challenged player can decline this game.",
+            ephemeral: true
+        });
+    }
+
+    clearGame(game.key);
+
+    const embed = new EmbedBuilder()
+        .setTitle("⚔️ ROCK PAPER SCISSORS")
+        .setDescription(
+            `❌ **${interaction.user.username}** declined the challenge.`
+        );
+
+    await interaction.update({
+        embeds: [embed],
+        components: []
+    });
+}
+
+// ============================================================
+// HANDLE PLAYER CHOICE
+// ============================================================
+
+async function handleChoice(
     interaction,
     client,
     game,
@@ -370,7 +358,10 @@ async function handleRPSChoice(
     const userId = interaction.user.id;
 
     if (!game.accepted) {
-        return;
+        return interaction.reply({
+            content: "❌ This game has not started yet.",
+            ephemeral: true
+        });
     }
 
     if (
@@ -385,14 +376,14 @@ async function handleRPSChoice(
     }
 
     // --------------------------------------------------------
-    // Prevent duplicate choice
+    // Player 1
     // --------------------------------------------------------
 
     if (userId === game.player1) {
         if (game.player1Choice) {
             return interaction.reply({
                 content:
-                    "❌ You already selected your move.",
+                    "❌ You already chose your move.",
                 ephemeral: true
             });
         }
@@ -400,11 +391,15 @@ async function handleRPSChoice(
         game.player1Choice = choice;
     }
 
+    // --------------------------------------------------------
+    // Player 2
+    // --------------------------------------------------------
+
     if (userId === game.player2) {
         if (game.player2Choice) {
             return interaction.reply({
                 content:
-                    "❌ You already selected your move.",
+                    "❌ You already chose your move.",
                 ephemeral: true
             });
         }
@@ -414,12 +409,12 @@ async function handleRPSChoice(
 
     await interaction.reply({
         content:
-            `✅ Your choice has been locked in: **${getChoiceName(choice)}**`,
+            `✅ Your choice is locked: **${getChoiceName(choice)}**`,
         ephemeral: true
     });
 
     // --------------------------------------------------------
-    // Only one player has chosen
+    // Wait for second player
     // --------------------------------------------------------
 
     if (
@@ -429,23 +424,22 @@ async function handleRPSChoice(
         return;
     }
 
-    // --------------------------------------------------------
-    // Both players chose
-    // --------------------------------------------------------
-
-    if (game.roundTimeout) {
-        clearTimeout(game.roundTimeout);
-        game.roundTimeout = null;
+    if (game.roundTimer) {
+        clearTimeout(game.roundTimer);
+        game.roundTimer = null;
     }
 
-    const result = determineWinner(
-        game.player1Choice,
-        game.player2Choice
+    const player1Choice = game.player1Choice;
+    const player2Choice = game.player2Choice;
+
+    const result = getWinner(
+        player1Choice,
+        player2Choice
     );
 
-    // --------------------------------------------------------
+    // ========================================================
     // TIE
-    // --------------------------------------------------------
+    // ========================================================
 
     if (result === "tie") {
         game.player1Choice = null;
@@ -455,28 +449,44 @@ async function handleRPSChoice(
             .setTitle("⚔️ ROCK PAPER SCISSORS")
             .setDescription(
                 `🤝 **It's a tie!**\n\n` +
-                `<@${game.player1}> chose **${getChoiceName(game.player1Choice)}**\n` +
-                `<@${game.player2}> chose **${getChoiceName(game.player2Choice)}**\n\n` +
-                `Choose again!`
+                `<@${game.player1}> chose **${getChoiceName(player1Choice)}**\n` +
+                `<@${game.player2}> chose **${getChoiceName(player2Choice)}**\n\n` +
+                `🔄 **Round restarted!**\n\n` +
+                `Choose again.`
             );
 
-        // Fix the displayed choices because they are reset above.
-        const p1Choice = game.lastPlayer1Choice;
-        const p2Choice = game.lastPlayer2Choice;
+        await game.message.edit({
+            embeds: [tieEmbed],
+            components: [
+                rpsButtons(game.id)
+            ]
+        }).catch(() => {});
 
-        void tieEmbed;
-        void p1Choice;
-        void p2Choice;
+        game.roundTimer = setTimeout(async () => {
+            if (!activeDuels.has(game.key)) {
+                return;
+            }
+
+            clearGame(game.key);
+
+            await game.message.edit({
+                embeds: [
+                    new EmbedBuilder()
+                        .setTitle("⚔️ ROCK PAPER SCISSORS")
+                        .setDescription(
+                            "⌛ **Round expired.**"
+                        )
+                ],
+                components: []
+            }).catch(() => {});
+        }, ROUND_TIMEOUT);
 
         return;
     }
 
-    // --------------------------------------------------------
-    // Save choices before cleanup
-    // --------------------------------------------------------
-
-    const p1Choice = game.player1Choice;
-    const p2Choice = game.player2Choice;
+    // ========================================================
+    // WINNER
+    // ========================================================
 
     const winnerId =
         result === "player1"
@@ -488,39 +498,48 @@ async function handleRPSChoice(
             ? game.player2
             : game.player1;
 
-    const winner =
-        await interaction.client.users.fetch(winnerId);
+    const winner = await client.users
+        .fetch(winnerId)
+        .catch(() => null);
 
-    const loser =
-        await interaction.client.users.fetch(loserId);
+    const loser = await client.users
+        .fetch(loserId)
+        .catch(() => null);
 
     addPoints(
         client,
         winnerId,
-        POINTS_WIN
+        WIN_POINTS
     );
 
-    cleanupGame(game.key);
+    const winnerChoice =
+        result === "player1"
+            ? player1Choice
+            : player2Choice;
 
-    const winnerBalance =
-        balanceText(client, winnerId);
+    const loserChoice =
+        result === "player1"
+            ? player2Choice
+            : player1Choice;
+
+    const balance =
+        getBalance(client, winnerId);
+
+    clearGame(game.key);
 
     const resultEmbed = new EmbedBuilder()
-        .setTitle("⚔️ ROCK PAPER SCISSORS")
+        .setTitle("🏆 ROCK PAPER SCISSORS")
         .setDescription(
-            `🏆 **${winner} wins!**\n\n` +
-            `**${winner}** chose ${getChoiceName(
-                result === "player1"
-                    ? p1Choice
-                    : p2Choice
-            )}\n` +
-            `**${loser}** chose ${getChoiceName(
-                result === "player1"
-                    ? p2Choice
-                    : p1Choice
-            )}\n\n` +
-            `🪙 **+${POINTS_WIN} points**\n` +
-            `💰 Balance: **${winnerBalance}**`
+            `## 🏆 ${winner || `<@${winnerId}>`} wins!\n\n` +
+
+            `**${winner || `<@${winnerId}>`}**\n` +
+            `${getChoiceName(winnerChoice)}\n\n` +
+
+            `**${loser || `<@${loserId}>`}**\n` +
+            `${getChoiceName(loserChoice)}\n\n` +
+
+            `🪙 **+${WIN_POINTS} points**\n` +
+            `💰 Balance: **${balance}**`
         )
         .setFooter({
             text: "Duel complete."
@@ -533,25 +552,28 @@ async function handleRPSChoice(
 }
 
 // ============================================================
-// REGISTER
+// REGISTER COMMAND
 // ============================================================
 
 module.exports = {
     register(client) {
 
-        // ====================================================
-        // /rps
-        // ====================================================
+        if (!client.commands) {
+            client.commands = new Map();
+        }
 
         client.commands.set("rps", {
             data: {
                 name: "rps",
-                description: "Challenge another player to Rock Paper Scissors.",
+                description:
+                    "Challenge another player to Rock Paper Scissors.",
+
                 options: [
                     {
                         type: 6,
                         name: "opponent",
-                        description: "The player you want to challenge.",
+                        description:
+                            "The player you want to challenge.",
                         required: true
                     }
                 ]
@@ -566,152 +588,95 @@ module.exports = {
         });
 
         // ====================================================
-        // INTERACTION HANDLER
+        // BUTTON HANDLER
         // ====================================================
 
         client.on(
             "interactionCreate",
             async interaction => {
 
+                if (!interaction.isButton()) {
+                    return;
+                }
+
+                const id = interaction.customId;
+
                 try {
 
-                    if (!interaction.isButton()) {
-                        return;
-                    }
+                    // ============================================
+                    // ACCEPT
+                    // ============================================
 
-                    const customId =
-                        interaction.customId;
-
-                    // ------------------------------------------------
-                    // Accept challenge
-                    // ------------------------------------------------
-
-                    if (
-                        customId.startsWith(
-                            "rps_accept_"
-                        )
-                    ) {
+                    if (id.startsWith("rpsaccept:")) {
 
                         const gameId =
-                            customId.replace(
-                                "rps_accept_",
-                                ""
-                            );
+                            id.slice("rpsaccept:".length);
 
                         const game =
-                            [...games.values()]
+                            [...activeDuels.values()]
                                 .find(
-                                    g => g.id === gameId
+                                    game =>
+                                        game.id === gameId
                                 );
 
                         if (!game) {
                             return interaction.reply({
                                 content:
-                                    "❌ This challenge is no longer active.",
+                                    "❌ This challenge has expired.",
                                 ephemeral: true
                             });
                         }
 
-                        if (
-                            interaction.user.id !==
-                            game.player2
-                        ) {
-                            return interaction.reply({
-                                content:
-                                    "❌ Only the challenged player can accept this.",
-                                ephemeral: true
-                            });
-                        }
-
-                        await startRPSRound(
-                            game,
-                            interaction
+                        await acceptRPS(
+                            interaction,
+                            game
                         );
 
                         return;
                     }
 
-                    // ------------------------------------------------
-                    // Decline challenge
-                    // ------------------------------------------------
+                    // ============================================
+                    // DECLINE
+                    // ============================================
 
-                    if (
-                        customId.startsWith(
-                            "rps_decline_"
-                        )
-                    ) {
+                    if (id.startsWith("rpsdecline:")) {
 
                         const gameId =
-                            customId.replace(
-                                "rps_decline_",
-                                ""
-                            );
+                            id.slice("rpsdecline:".length);
 
                         const game =
-                            [...games.values()]
+                            [...activeDuels.values()]
                                 .find(
-                                    g => g.id === gameId
+                                    game =>
+                                        game.id === gameId
                                 );
 
                         if (!game) {
                             return interaction.reply({
                                 content:
-                                    "❌ This challenge is no longer active.",
+                                    "❌ This challenge has expired.",
                                 ephemeral: true
                             });
                         }
 
-                        if (
-                            interaction.user.id !==
-                            game.player2
-                        ) {
-                            return interaction.reply({
-                                content:
-                                    "❌ Only the challenged player can decline this.",
-                                ephemeral: true
-                            });
-                        }
-
-                        cleanupGame(game.key);
-
-                        await interaction.update({
-                            embeds: [
-                                new EmbedBuilder()
-                                    .setTitle(
-                                        "⚔️ ROCK PAPER SCISSORS"
-                                    )
-                                    .setDescription(
-                                        `❌ **${interaction.user} declined the challenge.**`
-                                    )
-                            ],
-                            components: []
-                        });
+                        await declineRPS(
+                            interaction,
+                            game
+                        );
 
                         return;
                     }
 
-                    // ------------------------------------------------
-                    // RPS Choice
-                    // ------------------------------------------------
+                    // ============================================
+                    // CHOICE
+                    // ============================================
 
-                    if (
-                        customId.startsWith(
-                            "rps_"
-                        )
-                    ) {
+                    if (id.startsWith("rpschoice:")) {
 
                         const parts =
-                            customId.split("_");
+                            id.split(":");
 
-                        /*
-                         * Format:
-                         *
-                         * rps_GAMEID_rock
-                         * rps_GAMEID_paper
-                         * rps_GAMEID_scissors
-                         */
-
-                        if (parts.length < 3) {
+                        if (parts.length !== 3) {
                             return;
                         }
 
@@ -729,34 +694,36 @@ module.exports = {
                         }
 
                         const game =
-                            [...games.values()]
+                            [...activeDuels.values()]
                                 .find(
-                                    g => g.id === gameId
+                                    game =>
+                                        game.id === gameId
                                 );
 
                         if (!game) {
                             return interaction.reply({
                                 content:
-                                    "❌ This Duel is no longer active.",
+                                    "❌ This game has expired.",
                                 ephemeral: true
                             });
                         }
 
-                        await handleRPSChoice(
+                        await handleChoice(
                             interaction,
                             client,
                             game,
                             choice
                         );
+
+                        return;
                     }
 
                 } catch (error) {
 
                     console.error(
-                        "❌ Dual game interaction error:"
+                        "❌ Dual Games Error:",
+                        error
                     );
-
-                    console.error(error);
 
                     if (
                         interaction.replied ||
@@ -764,13 +731,13 @@ module.exports = {
                     ) {
                         await interaction.followUp({
                             content:
-                                "❌ Something went wrong.",
+                                "❌ Something went wrong while processing the game.",
                             ephemeral: true
                         }).catch(() => {});
                     } else {
                         await interaction.reply({
                             content:
-                                "❌ Something went wrong.",
+                                "❌ Something went wrong while processing the game.",
                             ephemeral: true
                         }).catch(() => {});
                     }
@@ -779,7 +746,7 @@ module.exports = {
         );
 
         console.log(
-            "✅ Dual game registered: RPS"
+            "✅ Dual Games loaded: RPS"
         );
     }
 };
